@@ -5,6 +5,8 @@
 //! star updates the item's `favorite`; the caller persists
 //! `favorite-spell-check-languages` and calls `sorter.changed(...)` to re-sort.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use gtk::glib;
@@ -63,6 +65,12 @@ pub fn build_list_factory(
 ) -> gtk::SignalListItemFactory {
     let factory = gtk::SignalListItemFactory::new();
 
+    // Per-widget handler IDs so we can disconnect the old per-bind handler
+    // before connecting a fresh one. Keyed by the ToggleButton's Object
+    // pointer, which is stable across row recycling.
+    let handler_ids: Rc<RefCell<HashMap<glib::Object, glib::SignalHandlerId>>> =
+        Rc::new(RefCell::new(HashMap::new()));
+
     factory.connect_setup(|_, item| {
         let item = item.downcast_ref::<gtk::ListItem>().expect("ListItem");
         let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
@@ -82,6 +90,7 @@ pub fn build_list_factory(
         item.set_child(Some(&row));
     });
 
+    let handler_ids_bind = handler_ids.clone();
     factory.connect_bind(move |_, item| {
         let item = item.downcast_ref::<gtk::ListItem>().expect("ListItem");
         let Some(lang) = item.item().and_downcast::<SpellLang>() else {
@@ -97,8 +106,13 @@ pub fn build_list_factory(
         update_star_visual(&star, lang.favorite());
         star.set_active(lang.favorite());
 
-        // Reconnect cleanly each bind: stash the handler id on the button.
-        if let Some(id) = unsafe { star.steal_data::<glib::SignalHandlerId>("toggle-id") } {
+        // Reconnect the toggle handler on every bind so the closure always
+        // captures the current SpellLang. The handler ID is tracked in a
+        // HashMap keyed by ToggleButton's Object pointer, which is stable
+        // across row recycling. Without this, set_active above would fire a
+        // stale closure from a previous bind on a recycled row.
+        let star_obj: glib::Object = star.clone().upcast();
+        if let Some(id) = handler_ids_bind.borrow_mut().remove(&star_obj) {
             star.disconnect(id);
         }
         let on_toggle = on_toggle.clone();
@@ -109,7 +123,7 @@ pub fn build_list_factory(
             update_star_visual(btn, now);
             on_toggle(&lang, now);
         });
-        unsafe { star.set_data("toggle-id", id) };
+        handler_ids_bind.borrow_mut().insert(star_obj, id);
     });
 
     factory
